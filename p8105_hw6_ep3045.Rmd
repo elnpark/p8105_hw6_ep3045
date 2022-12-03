@@ -14,6 +14,9 @@ knitr::opts_chunk$set(
 	out.width = "90%",
 	dpi = 200
 )
+
+
+setwd("~/COLUMBIA/Fall 2022/DATA SCIENCE/p8105_hw6_ep3045")
 ```
 
 
@@ -27,9 +30,11 @@ library(modelr)
 ```{r}
 theme_set(theme_minimal() + theme(legend.position = "bottom"))
 options(
-  ggplot2.continuous.colour = "yeti",
-  ggplot2.continuous.fill = "yeti"
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
 )
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
 ```
 
 
@@ -66,4 +71,227 @@ weather_df %>%
 
 The $\hat{r}^2$ value is high, between 0.91 and 0.92. The bounds [0.89, 1] may be an explanation for the skewed distribution. For a confidence interval, we can take the 2.5% and 97.5% quantiles of the sample estimates. However, because the distribution is skewed, this would not produce the most accurate result. 
 
+## Problem 2
+
+### Data Cleaning
+
+Import the data.
+
+```{r}
+homicide = read_csv("data/homicide-data.csv")
+```
+
+Create a `city_state` variable and a `status` binary variable indicating whether the homicide is solved.
+
+```{r}
+homicide = homicide %>% 
+  mutate(
+    state = str_to_upper(state),
+    city_state = str_c(city, ", ", state),
+    status = case_when(
+      disposition == "Closed by arrest"      ~ "resolved",
+      disposition == "Closed without arrest" ~ "unresolved",
+      disposition == "Open/No arrest"        ~ "unresolved",
+      TRUE                                   ~ ""
+    )
+  ) %>% 
+  filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")))
+```
+
+Limit the analysis to `victim_race` `white` or `black`. Change `victim_age` to numeric.
+
+```{r}
+homicide_sub = homicide %>% 
+  filter(victim_race %in% c("Black", "White")) %>% 
+  mutate(victim_age = as.numeric(victim_age))
+```
+
+### Logistic Regression for Baltimore, MD
+
+```{r}
+fit = 
+  homicide_sub %>% 
+  filter(city_state == "Baltimore, MD") %>% 
+  mutate(
+    status = fct_relevel(status, "unresolved")
+  ) %>% 
+  glm(status ~ victim_age + victim_sex + victim_race, data = ., family = "binomial")
+```
+
+`broom::tidy()` to extract the results of logistic regression. To get the estimate and confidence interval of the adjusted **odds ratio**, we square the coefficient and the CI. 
+
+```{r}
+fit %>% 
+  broom::tidy() %>% 
+  mutate(
+    OR = exp(estimate),
+    lower_bound = exp(estimate - 1.96 * std.error),
+    upper_bound = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  select(term, log_OR = estimate, OR, lower_bound, upper_bound) %>%
+  knitr::kable(
+    digits = 3,
+    col.names = c("Term", "log(OR)", "Odds Ratio", "95% Lower", "95% Upper")    
+  )
+```
+
+The adjusted odds ratio for solving homicides comparing male victims to female victims is 0.426. The 95% confidence interval is (0.325, 0.558).
+
+### Logistic Regression on Each City
+
+```{r}
+homicide_nest = homicide_sub %>% 
+  mutate(
+    status = fct_relevel(status, "unresolved")
+  ) %>% 
+  nest(df = -city_state)
+fit = homicide_nest %>% 
+  mutate(
+    models = map(.x = df, ~ glm(status ~ victim_age + victim_sex + victim_race, data = .x, family = "binomial")),
+    results = map(models, broom::tidy)
+  ) %>% 
+  select(city_state, results) %>% 
+  unnest(results) %>% 
+  mutate(
+    OR = exp(estimate),
+    lower_bound = exp(estimate - 1.96 * std.error),
+    upper_bound = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  filter(term == "victim_sexMale") %>% 
+  select(city_state, log_OR = estimate, OR, lower_bound, upper_bound)
+fit %>% 
+  knitr::kable(
+    digits = 3,
+    col.names = c("City, State", "log(OR)", "Odds Ratio", "95% Lower", "95% Upper")  
+  )
+```
+
+
+```{r}
+estimate_ci_plot = fit %>% 
+  mutate(
+    city_state = fct_reorder(city_state, OR)
+  ) %>% 
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_bound, ymax = upper_bound)) +
+  labs(
+    x = "City, State",
+    y = "Estimated Adjusted OR\nwith 95% Confidence Interval",
+    title = "Estimated Adjusted Odds Ratio for Solving Homicides Comparing Male Victims to Female Victims in Each City"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title = element_text(face = "bold")
+  )
+ggsave(
+  estimate_ci_plot,
+  filename = "estimate_plot.png",
+  width = 24,
+  height = 20,
+  units = "cm",
+  bg = "white"
+)
+knitr::include_graphics("estimate_plot.png")
+```
+
+Among the `r nrow(homicide_nest)` cities in the dataset, New York, NY has the lowest estimated OR for solving homicide comparing male victims to female victims. Albuquerque, NM, has the highest estimated OR for solving homicide comparing male victims to female victims. However, Albuquerque has a much wider confidence interval compared to New York, indicating less precision in the estimated OR.
+
+
+## Problem 3
+
+### Data Cleaning
+
+```{r}
+birthweight_df = 
+  read_csv("birthweight.csv") %>% 
+  janitor::clean_names() 
+skimr::skim(birthweight_df)$n_missing
+bwt_cleaned =
+  birthweight_df %>%
+  mutate(babysex = recode(babysex,'1' = 'male', '2' = 'female'),
+         babysex = factor(babysex, levels = c('male', 'female')),
+         frace = recode(frace,
+                        '1' = 'White',
+                        '2' = 'Black',
+                        '3' = 'Asian',
+                        '4' = 'Puerto Rican',
+                        '8' = 'Other',
+                        '9' = 'Unknown'), 
+         frace = factor(frace, levels = c('White', 'Black', 'Asian', 'Puerto Rican', 'Other')),
+         malform = recode(malform, '0' = 'absent', '1' = 'present'),
+         malform = factor(malform, levels = c('absent', 'present')), 
+         mrace = recode(mrace,
+                        '1' = 'White',
+                        '2' = 'Black',
+                        '3' = 'Asian',
+                        '4' = 'Puerto Rican',
+                        '8' = 'Other'), 
+         mrace = factor(mrace, levels = c('White', 'Black', 'Asian', 'Puerto Rican', 'Other')))
+```
+
+### Fit a Linear Regression Model
+
+According to the 2022 study by Shaohua et. al., the biggest influences for birthweight is maternal weight gain, gestational weeks, and mothers smoking status. Research also shows that there are racial disparities in birthweight. 
+```{r}
+regression =
+  lm(bwt ~ bhead + blength  + mrace + mheight + wtgain + smoken + gaweeks, 
+     data = birthweight)
+
+birthweight %>% 
+  add_predictions(regression) %>% 
+  add_residuals(regression) %>% 
+  ggplot(aes(x = pred, y = resid, color = resid)) +
+  geom_point(alpha = .3) +
+  labs(
+    x = "Fitted Values of Birth Weight",
+    y = "Residuals",
+    color = "Residuals",
+    title = "Model Residuals vs Fitted Values of Birth Weight"
+  )
+```
+```
+
+
+Comparing model to two others 
+
+```{r}
+model_1= lm(bwt ~ blength + gaweeks, data=birthweight)
+model_2= lm(bwt ~ bhead + blength + babysex +
+              bhead * blength + 
+              bhead * babysex + 
+              blength * babysex + 
+              bhead * blength * babysex, data= birthweight)
+cv_df = 
+  crossv_mc(birthweight, 100) 
+cv_df = cv_df %>% 
+  mutate(
+    model_0 = map(train, ~lm(bwt ~ smoken + wtgain + bhead + blength + mrace + gaweeks, data = .)),
+    model_1 = map(train, ~lm(bwt ~ blength + gaweeks, data = .)),
+    model_2 = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead * blength + bhead * babysex + blength * bhead + bhead * blength * babysex, data = .)),
+  ) %>% 
+  mutate(
+    rmse_model_0 = map2_dbl(model_0, test, ~rmse(model = .x, data = .y)),
+    rmse_model_1 = map2_dbl(model_1, test, ~rmse(model = .x, data = .y)),
+    rmse_model2 = map2_dbl(model_2, test, ~rmse(model = .x, data = .y))
+  )
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse, fill = model)) + 
+  geom_violin() +
+  labs(
+    x = "Model",
+    y = "RMSE",
+    title = "The distribution of RMSE values for each model"
+  ) +
+  scale_x_discrete(labels=c("model0" = "Model 0", "model1" = "Model 1",
+                              "model2" = "Model 2"))
+```
 
